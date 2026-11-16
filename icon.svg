@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64" role="img" aria-label="Context cap">
+  <rect x="4.5" y="15.5" width="55" height="33" rx="8" fill="none" stroke="#4f6bff" stroke-width="3"/>
+  <rect x="11" y="26" width="25" height="12" rx="3" fill="#4f6bff" fill-opacity="0.32"/>
+  <path d="M40 21v22" stroke="#e0562f" stroke-width="4" stroke-linecap="round"/>
+  <path d="M46 32h9" stroke="#4f6bff" stroke-width="3" stroke-linecap="round"/>
+</svg>

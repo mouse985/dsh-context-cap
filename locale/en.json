@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Context cap",
+    "description": "A chip on the right of the composer that caps the routed model's context window at 32k / 64k / 128k / 256k / 512k / 1M, so automatic compaction fires earlier and a long conversation stops pushing each request to the full window. Click the chip, pick a limit, and the value lands immediately; it writes the provider's own contextWindow setting, so it applies to every session running that model. Sessions already above the new cap compact at the next step."
+  }
+}

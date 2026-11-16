@@ -1,0 +1,7 @@
+# dsh-context-cap bundle patch.
+#
+# One row; the Node half is an empty plugin and all behaviour lives in the
+# Client half served from ./client.js.
+- insert:
+    - id: context-cap
+      name: 'dsh-context-cap'
