@@ -2,7 +2,7 @@
 
 对话框里的一枚「上下文上限」控件：把当前模型的 `contextWindow` 直接调到 32k / 64k / 128k / 256k / 512k / 1M，从而让自动压缩提前触发，长对话不再把单次请求顶到 1M。
 
-![胶囊显示「上下文 256k」；面板列出 32k/64k/128k/256k/512k/1M 与「恢复默认」，并给出压缩点](assets/panel.png)
+![胶囊显示「上下文 256k」；面板列出 32k/64k/128k/256k/512k/1M 与「恢复默认」，并给出压缩点](https://raw.githubusercontent.com/mouse985/dsh-context-cap/main/assets/panel.png)
 
 ## 它改的是什么
 
