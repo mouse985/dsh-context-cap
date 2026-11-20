@@ -31,9 +31,19 @@
 1. `ctx.get('remote.<ns>', false)` 上的方法（`remote.session` / `remote.settings`），位置参数直接 spread——这是装配好的客户端自己带 transport，最稳。
 2. 同源 HTTP 兜底：`POST /api/<namespace>/<method>`，body `{ type: 'client-request', rpcId, method: '<ns>/<method>', payload: <参数记录> }`（参数记录失败时再试 `{ args }` 包一层）。
 
-不要再写 `ctx.remote.session`、`connection.api` 这类点属性读取：cordis 的追踪代理会抛 `cannot get property "<key>" without inject`。也不需要把 `remote.<ns>` 塞进 `inject`——`ctx.get(key, false)` 是注册表读取，非 strict 模式在提供方 fiber 未 ACTIVE 时也照常返回，插件自己的 `inject` 只留 `['slots', 'locale']`。读失败会退避重试 3 次（500ms 间隔），不把胶囊钉死在 `—`。排障时在浏览器控制台跑 `__dshContextCap.probe()`，它会列出两个命名空间的可用方法链与 HTTP 能力。
+不要再写 `ctx.remote.session`、`connection.api` 这类点属性读取：cordis 的追踪代理会抛 `cannot get property "<key>" without inject`。也不需要把 `remote.<ns>` 塞进 `inject`——`ctx.get(key, false)` 是注册表读取，非 strict 模式在提供方 fiber 未 ACTIVE 时也照常返回，插件自己的 `inject` 只留 `['slots', 'locale']`。读失败会退避重试 20 次（400ms 起，每次 +200ms，封顶 2s），并且区分「通道还没接上」与真实拒绝：前者显示重启提示，后者显示原始错误。排障时在浏览器控制台跑 `__dshContextCap.probe()`，它会列出两个命名空间的可用方法链与 HTTP 能力。
 
 显示的窗口取设置项的值：写入后 `load()` 立刻重读该命名空间，所以胶囊与面板马上同步，不用等下一轮对话。会话投影 `contextPressure.contextWindow` 只在设置项没有容量（`提供方固定`）时兜底——它按 step 重新解析，滞后一轮。
+
+**写入不静默**：写之前先把选中的数字乐观地显示出来（调大不能被当成没改），`mutate` 成功后立刻回读；回读一致才关面板，不一致时面板留着并写出两个数字——`已写入 512k，但读回仍是 1M：重启 DSH 后才会生效` 或 `已写入 512k；这一页回读仍是 1M，下一轮请求按新值计算`（提供方 `applies: 'live'` 时后者说明只是本页缓存滞后）。回读彻底失败时提示「这一页暂时读不回来」，同样不关面板。
+
+## 安装
+
+```bash
+dsh plugin --profile <name> add dsh-context-cap
+```
+
+**装完重启一次 DSH。** 客户端那一半在进程启动时注册进页面模块表；插件刚装好（或刚升级）时，控件会先渲染出来，但宿主通道还没接上——这时面板会直接显示「界面已就绪，但宿主通道还没接上。重启 DSH 后这个控件才能真正读写设置」，并给一个「重试」按钮，不再把一段传输栈抛给用户。
 
 ## 用法
 

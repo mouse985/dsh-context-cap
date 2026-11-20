@@ -30,6 +30,14 @@
       /** Offered windows, in tokens; the last one matches the shipped DeepSeek default. */
       const PRESETS = [32768, 65536, 131072, 262144, 524288, 1048576]
 
+      /**
+       * Read attempts spent on a channel that is still mounting. A freshly
+       * installed or updated plugin paints its control before the host half is
+       * composed, so the first reads fail on a missing namespace; those are a
+       * wait, and the wait outlasts a user reloading the window by hand.
+       */
+      const NOT_READY_RETRIES = 20
+
       /** Gateway transport prefix on the same origin (`packages/client/connection/src/index.ts`). */
       const API_PATH = '/api'
 
@@ -56,6 +64,11 @@
           'conflict': '设置已被其他地方修改，已重新读取，请再试一次。',
           'error': '读取失败：{message}',
           'restart': '该提供方的设置在下一次启动后生效。',
+          'restartNeeded': '界面已就绪，但宿主通道还没接上。重启 DSH 后这个控件才能真正读写设置。',
+          'retry': '重试',
+          'verifyMismatch': '已写入 {want}，但读回仍是 {got}：重启 DSH 后才会生效。',
+          'verifyLag': '已写入 {want}；这一页回读仍是 {got}，下一轮请求按新值计算，重启 DSH 后再核对一次。',
+          'unverified': '已写入 {want}；这一页暂时读不回来，新一轮开始时会按它算压缩点。',
         },
         en: {
           'label': 'Context',
@@ -76,6 +89,11 @@
           'conflict': 'Settings changed elsewhere; reloaded. Try again.',
           'error': 'Read failed: {message}',
           'restart': 'This provider applies its settings on the next start.',
+          'restartNeeded': 'The UI is ready but the host channel is not. Restart DSH before this control can read or write settings.',
+          'retry': 'Retry',
+          'verifyMismatch': 'Wrote {want}, but the read-back still reports {got}: a DSH restart makes it stick.',
+          'verifyLag': 'Wrote {want}; this page still reads {got}. New turns use the new value — re-check after a DSH restart.',
+          'unverified': 'Wrote {want}; this page cannot read it back yet. New turns use it for the compaction point.',
         },
       }
 
@@ -252,10 +270,16 @@
         const [open, setOpen] = React.useState(false)
         const [busy, setBusy] = React.useState(false)
         const [notice, setNotice] = React.useState(null)
+        const [pendingRestart, setPendingRestart] = React.useState(false)
         const rootRef = React.useRef(null)
         const requestRef = React.useRef(0)
         const attemptRef = React.useRef(0)
 
+        /**
+         * Read the routed model's window into the snapshot.
+         * @returns The window the settings report now, or `undefined` when the
+         * read failed — a write uses it to confirm what the host stored.
+         */
         const load = React.useCallback(async () => {
           const ticket = ++requestRef.current
           try {
@@ -263,12 +287,12 @@
             const selection = catalog && catalog.default ? catalog.default : null
             if (!selection) throw new Error('modelCatalog reported no deployment default model')
             const view = unwrap(await call('settings', 'describe', []))
-            if (ticket !== requestRef.current) return
+            if (ticket !== requestRef.current) return undefined
             const located = locateModel(view.namespaces, selection)
             attemptRef.current = 0
             if (located === null) {
               setSnapshot({ status: 'fixed', model: selection.model })
-              return
+              return null
             }
             setSnapshot({
               status: 'ready',
@@ -282,9 +306,11 @@
               index: located.index,
               window: typeof located.window === 'number' ? located.window : null,
             })
+            return typeof located.window === 'number' ? located.window : null
           } catch (error) {
-            if (ticket !== requestRef.current) return
+            if (ticket !== requestRef.current) return undefined
             setSnapshot({ status: 'error', message: messageOf(error) })
+            return undefined
           }
         }, [call, sessionId])
 
@@ -293,14 +319,25 @@
           return () => { requestRef.current += 1 }
         }, [load])
 
-        // The connection service comes up after the first paint, and a failed
-        // read must not leave the pill stuck at `—` for the session's lifetime.
+        // The connection service comes up after the first paint, and a plugin
+        // installed or updated in this process mounts its control before the
+        // host half is composed. Both are a wait, not a dead end: retry with a
+        // growing delay instead of leaving the pill at `—` for good.
         React.useEffect(() => {
-          if (snapshot.status !== 'error' || attemptRef.current >= 3) return
-          attemptRef.current += 1
-          const timer = setTimeout(() => { void load() }, 500)
+          if (snapshot.status !== 'error' || attemptRef.current >= NOT_READY_RETRIES) return
+          const attempt = attemptRef.current
+          attemptRef.current = attempt + 1
+          const timer = setTimeout(() => { void load() }, Math.min(2000, 400 + attempt * 200))
           return () => clearTimeout(timer)
         }, [snapshot, load])
+
+        /** Drop the retry budget and read again, for the panel's retry button. */
+        const retry = React.useCallback(() => {
+          attemptRef.current = 0
+          setSnapshot({ status: 'loading' })
+          setNotice(null)
+          void load()
+        }, [load])
 
         React.useEffect(() => {
           if (!open) return
@@ -319,24 +356,32 @@
           }
         }, [open])
 
+        /**
+         * Write one window and confirm it landed. A catalog write sends the whole
+         * array because a path write would materialize `models` as an
+         * index-keyed object the schema rejects; an override entry is patchable by
+         * path. The panel then re-reads instead of trusting the write: a number
+         * the host did not store must not look like a number it did.
+         * @param tokens Window in tokens, or null to drop the cap.
+         */
         const write = React.useCallback(async tokens => {
           if (snapshot.status !== 'ready') return
           setBusy(true)
           setNotice(null)
+          setPendingRestart(false)
+          const nextRows = snapshot.kind === 'catalog'
+            ? snapshot.rows.map((row, index) => {
+              if (index !== snapshot.index) return row
+              if (tokens === null) {
+                const { contextWindow: _removed, ...rest } = row
+                return rest
+              }
+              return { ...row, contextWindow: tokens }
+            })
+            : snapshot.rows
           try {
             const ops = snapshot.kind === 'catalog'
-              ? [{
-                op: 'set',
-                path: snapshot.path,
-                value: snapshot.rows.map((row, index) => {
-                  if (index !== snapshot.index) return row
-                  if (tokens === null) {
-                    const { contextWindow: _removed, ...rest } = row
-                    return rest
-                  }
-                  return { ...row, contextWindow: tokens }
-                }),
-              }]
+              ? [{ op: 'set', path: snapshot.path, value: nextRows }]
               : [tokens === null
                 ? { op: 'unset', path: snapshot.path }
                 : { op: 'set', path: snapshot.path, value: tokens }]
@@ -349,8 +394,42 @@
               await load()
               return
             }
-            setOpen(false)
-            await load()
+            // The chosen number is what the user just decided, so show it at
+            // once: the read-back below can lag a restart-only provider by a
+            // whole process, and a raise must never look like a no-op.
+            setSnapshot(previous => previous.status === 'ready'
+              ? { ...previous, window: tokens, rows: nextRows }
+              : previous)
+            const confirmed = await load()
+            if (tokens === null) {
+              setOpen(false)
+              return
+            }
+            if (confirmed !== undefined && confirmed !== null && sameWindow(confirmed, tokens)) {
+              setOpen(false)
+              return
+            }
+            if (confirmed === undefined) {
+              setNotice(t('unverified', { want: formatTokens(tokens) }))
+              return
+            }
+            // One settle read: a live provider can report the new value a moment
+            // after accepting the write, and a mismatch here is otherwise
+            // indistinguishable from "the write never landed".
+            await new Promise(resolve => setTimeout(resolve, 500))
+            const settled = await load()
+            if (settled !== undefined && settled !== null && sameWindow(settled, tokens)) {
+              setOpen(false)
+              return
+            }
+            const got = settled === undefined ? confirmed : settled
+            setPendingRestart(true)
+            setNotice(got === null || got === undefined
+              ? t('verifyMismatch', { want: formatTokens(tokens), got: t('fixed') })
+              : t(snapshot.applies === 'restart' ? 'verifyMismatch' : 'verifyLag', {
+                want: formatTokens(tokens),
+                got: formatTokens(got),
+              }))
           } catch (error) {
             setNotice(messageOf(error))
           } finally {
@@ -390,7 +469,17 @@
             h('span', { className: 'dcc-sub' }, snapshot.model ?? ''),
           ),
           snapshot.status === 'loading' && h('div', { className: 'dcc-usage' }, t('loading')),
-          snapshot.status === 'error' && h('div', { className: 'dcc-warn' }, t('error', { message: snapshot.message })),
+          snapshot.status === 'error' && (isNotReady(snapshot.message)
+            ? h('div', null,
+              h('div', { className: 'dcc-warn' }, t('restartNeeded')),
+              h('button', {
+                type: 'button',
+                className: 'dcc-opt',
+                disabled: busy,
+                onClick: retry,
+              }, t('retry')),
+            )
+            : h('div', { className: 'dcc-warn' }, t('error', { message: snapshot.message }))),
           snapshot.status === 'fixed' && h('div', { className: 'dcc-warn' }, t('fixedBody')),
           snapshot.status === 'ready' && h('div', null,
             h('div', { className: 'dcc-usage' },
@@ -424,6 +513,7 @@
             busy && h('div', { className: 'dcc-usage' }, t('busy')),
             notice !== null && h('div', { className: 'dcc-warn' }, notice),
             snapshot.applies === 'restart' && h('div', { className: 'dcc-warn' }, t('restart')),
+            pendingRestart && h('div', { className: 'dcc-warn' }, t('restart')),
           ),
           h('div', { className: 'dcc-note' },
             h('b', null, t('note.title')),
@@ -515,6 +605,31 @@
         } catch {
           return String(error)
         }
+      }
+
+      /** Markers of a host channel that has not mounted yet, not of a real refusal. */
+      const NOT_READY_MARKERS = [
+        'service unavailable',
+        'without inject',
+        'connection API unavailable',
+        'has no models',
+        'transport failure',
+        'fetch unavailable',
+        'HTTP 403',
+        'HTTP 404',
+      ]
+
+      /**
+       * Whether a failed read means "the host half is not composed in this
+       * process yet" — the state right after installing or updating the plugin
+       * and before DSH restarts. The user needs a restart instruction, not the
+       * transport stack trace.
+       * @param message Failure text produced by `call`.
+       * @returns True when the channel, rather than the call, is missing.
+       */
+      function isNotReady(message) {
+        if (typeof message !== 'string') return false
+        return NOT_READY_MARKERS.some(marker => message.includes(marker))
       }
 
       /** Plugin body: one locale registration and one composer-slot registration. */

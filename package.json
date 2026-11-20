@@ -1,6 +1,6 @@
 {
   "name": "dsh-context-cap",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Composer control that caps the routed model's context window so automatic compaction fires earlier and long conversations stay cheap.",
   "license": "MIT",
   "keywords": [
